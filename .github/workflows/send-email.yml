@@ -86,7 +86,7 @@ jobs:
             done < <(git diff --name-only "${base}" "${AFTER_SHA}" -- 'digests/*.md' | grep -v '_TEMPLATE.md' || true)
           fi
 
-          if [ ${#files[@]} -eq 0 ]; then
+          if [ "${#files[@]}" -eq 0 ]; then
             echo "本次没有发现新增或修改的日报，跳过发送。"
             exit 0
           fi
