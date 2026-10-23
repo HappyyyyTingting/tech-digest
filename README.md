@@ -2,10 +2,15 @@
 
 Grok 每天搜索 X 上的科技股市动态，写成面向新手的 Markdown 日报，提交到这个仓库；GitHub Actions 再把完整日报渲染成邮件发到邮箱。
 
-当前已经打通：
+当前状态（2026-10-23）：
 
-- **阶段 1**：`Grok → GitHub`（每天写入 `digests/YYYY-MM-DD.md`）
-- **阶段 2**：`GitHub → 邮件`（Actions 自动渲染完整正文并发送）
+| 环节 | 状态 |
+|---|---|
+| Grok → GitHub | ✅ 已验证：Grok 已写入 `digests/2026-10-23.md` |
+| GitHub Actions → 邮件 | ✅ 已验证：手动触发 workflow 成功，真实邮件已送达 |
+| Grok push 自动触发 | ⏳ 已配置，等待 Grok 下一次自动推送验证 |
+
+当前使用 **SMTP** 发信；发件邮箱、SMTP 授权码和收件地址只保存在 GitHub Actions Secrets 中，不写进仓库。
 
 ```
 Grok Automation（每天 07:30）
@@ -55,7 +60,7 @@ https://github.com/HappyyyyTingting/tech-digest
 在本地终端执行：
 
 ```bash
-cd /Users/tingtingyu/tingting/tech-digest
+cd /path/to/tech-digest
 git remote add origin https://github.com/HappyyyyTingting/tech-digest.git
 git add .
 git commit -m "chore: init tech-digest repository"
@@ -185,9 +190,11 @@ git push -u origin main
 3. 点开 `digests/2026-10-23.md`，确认格式和内容完整
 4. 回到 Grok 的 run history，确认这次运行没有报错
 
-如果成功，阶段 1 就完成了。
+如果成功，阶段 1 就完成了（2026-10-23 已验证）。
 
-## 阶段 2：GitHub → 邮件
+## 阶段 2：GitHub → 邮件（已完成）
+
+当前仓库使用 **SMTP** 方式发信，已经成功发出一封真实邮件。下面的 Resend 方案作为备选保留。
 
 ### 它是怎么工作的
 
@@ -201,7 +208,9 @@ git push -u origin main
 
 ### 1. 选择邮件服务并准备账号
 
-#### 方案 A：Resend（最省事，推荐先用这个）
+当前使用 SMTP；Resend 保留为备选。两种都支持，按需选择。
+
+#### 方案 A：Resend（备选）
 
 1. 打开 <https://resend.com> 注册（可以用你的 Foxmail 邮箱注册）。
 2. 在 **API Keys** 页面创建一个 key，权限选 `Sending access` 即可。
@@ -217,9 +226,9 @@ git push -u origin main
 | `MAIL_FROM` | `onboarding@resend.dev` 或已验证域名下的地址 |
 | `MAIL_TO` | 收件邮箱，多个用英文逗号分隔 |
 
-#### 方案 B：SMTP（QQ / Foxmail / 163 / SMTP2GO 等）
+#### 方案 B：SMTP（当前使用，已验证）
 
-以 Foxmail / QQ 邮箱为例：
+以 QQ / Foxmail 为例；其他邮箱把服务器和端口换成服务商提供的值。当前实际使用的发件邮箱不在公开 README 中展示。
 
 1. 登录 QQ 邮箱网页版 → 设置 → 账号 → 开启 **SMTP 服务**。
 2. 按提示生成 **授权码**。注意：SMTP 密码填授权码，不是 QQ 登录密码。
@@ -249,13 +258,36 @@ git push -u origin main
 
 把上表里的名字和值逐个添加。`MAIL_TO` 和 `MAIL_FROM` 是必填；`MAIL_REPLY_TO` 可选。
 
-注意：
+Secret 的可见性：
 
-- Secrets 不会出现在公开仓库里，也不会被 workflow 日志打印。
+- 未登录访客看不到 secret 值；未登录时 Actions 日志会提示 `Sign in to view logs`。
+- 公开仓库的 Actions 日志对登录用户可见，但 GitHub 会自动打码 secret 值。
+- 仓库管理员和协作者也不能通过网页/API 读回 secret 明文；不过有 write 权限的人可以修改 workflow 把 secret 发出去，所以只给信任的人写权限。
+- 当前脚本只打印日报路径、主题、HTML 大小和 provider，不打印 `MAIL_TO`、`MAIL_FROM`、`SMTP_PASSWORD` 或 `RESEND_API_KEY`。
 - 不要把邮箱授权码、API key 写进 README、Markdown 或代码。
 - 如果使用 Resend 的 `onboarding@resend.dev`，收件人必须是 Resend 账号注册邮箱；否则会报 403。
 
-### 3. 先做一次不发送的测试（可选）
+### 3. 修改发件人显示名称（可选）
+
+邮件里显示的发送人名称来自 `MAIL_FROM`，格式是：
+
+```text
+显示名称 <真实邮箱地址>
+```
+
+例如：
+
+```text
+科技股市日报 <digest@example.com>
+```
+
+修改 GitHub Secret `MAIL_FROM` 后重新运行 workflow 即可，不需要改代码。注意：
+
+- 尖括号里的地址必须是 SMTP 服务允许的发件地址，通常要和 `SMTP_USER` 一致；Resend 则必须是已验证域名下的地址。
+- 普通中文名称不需要引号；如果名称里包含英文逗号、引号等特殊字符，才需要用双引号包起来。
+- 如果 SMTP 报 `550 From header invalid`，先把 `MAIL_FROM` 改回纯邮箱地址排查。
+
+### 4. 先做一次不发送的测试（可选）
 
 `Actions → Send digest email → Run workflow`
 
@@ -263,7 +295,7 @@ git push -u origin main
 - 勾选 `dry_run` = 只渲染，不发邮件
 - 运行结束后在该次 run 页面底部下载 `email-preview` artifact，打开 `email_preview.html` 检查排版
 
-### 4. 发一封真实测试邮件
+### 5. 发一封真实测试邮件
 
 再次 `Run workflow`，`file` 留空，`dry_run` 不勾选。运行成功后：
 
@@ -271,14 +303,14 @@ git push -u origin main
 2. 点开邮件，确认五个小节和来源链接都在。
 3. 在手机上打开，确认是单栏、字号可读。
 
-### 5. 之后就是自动的
+### 6. 之后就是自动的
 
 Grok 每天写入 `digests/YYYY-MM-DD.md` 后，push 会自动触发 workflow 并发邮件。可以在 `Actions` 页面看到每次运行记录。
 
 ### 本地预览和本地发送
 
 ```bash
-cd /Users/tingtingyu/tingting/tech-digest
+cd /path/to/tech-digest
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 
@@ -286,14 +318,26 @@ python3 -m venv .venv
 .venv/bin/python scripts/send_email.py --file digests/2026-10-23.md --dry-run
 open email_preview.html
 
-# 本地真实发送（环境变量只放在当前终端，不要提交）
-export MAIL_TO='your@email.com'
-export MAIL_FROM='onboarding@resend.dev'
-export RESEND_API_KEY='re_...'
+# 本地真实发送（以 SMTP 为例；环境变量只放在当前终端，不要提交）
+export MAIL_TO='you@example.com'
+export MAIL_FROM='科技股市日报 <digest@example.com>'
+export EMAIL_PROVIDER='smtp'
+export SMTP_HOST='smtp.example.com'
+export SMTP_PORT='465'
+export SMTP_SECURITY='ssl'
+export SMTP_USER='digest@example.com'
+
+printf 'SMTP 授权码: '
+read -rs SMTP_PASSWORD
+echo
+export SMTP_PASSWORD
+
 .venv/bin/python scripts/send_email.py --latest
+
+unset SMTP_PASSWORD
 ```
 
-本地发送也支持 SMTP，把上面的 Resend 变量换成 `SMTP_*` 即可。
+如果使用 Resend，把上面的 SMTP 变量换成 `RESEND_API_KEY`，并把 `EMAIL_PROVIDER` 改成 `resend` 即可。
 
 ### 运行测试
 
@@ -332,8 +376,21 @@ Grok 必须写到 `digests/YYYY-MM-DD.md`。如果它写到了根目录，检查
 
 - 日报内容来自公开的 X 帖子，公开没有问题
 - 不要把 API key、邮箱密码、个人隐私写进 Markdown
-- 阶段 2 的 secrets 存在 GitHub Actions Secrets 里，不会出现在公开仓库
-- 工作流日志只打印日报路径、主题和邮件大小，不打印密码或 API key
+- 阶段 2 的 secrets 存在 GitHub Actions Secrets 里；值不会出现在公开仓库，也不能通过网页/API 读回
+- 未登录看不到 Actions 日志；登录用户能看到日志，但 secret 值会被 GitHub 自动打码
+- 当前脚本只打印日报路径、主题、HTML 大小和 provider，不打印邮箱、授权码或 API key
+- 有 write 权限的协作者可以修改 workflow 读取 secret，所以只给信任的人写权限
+
+### Secret 会出现在 Actions 日志里吗
+
+正常情况下不会：
+
+- workflow 通过环境变量传入 secret，没有 `echo` 或打印它们。
+- 脚本不会输出 `MAIL_TO`、`MAIL_FROM`、`SMTP_PASSWORD`、`RESEND_API_KEY`。
+- GitHub 会对日志里的 secret 值自动打码。
+- 未登录访客连日志都看不到，页面会提示 `Sign in to view logs`。
+
+注意：如果以后自己加了 `echo`、调试输出，或者把 secret 做编码/拼接后再打印，GitHub 的打码可能失效。不要把 secret 传给不可信的第三方 Action。
 
 ### 推送后 workflow 没有运行
 
@@ -381,7 +438,10 @@ Grok 必须写到 `digests/YYYY-MM-DD.md`。如果它写到了根目录，检查
 
 ### 想改收件人或发件人
 
-改 GitHub Secrets 里的 `MAIL_TO` / `MAIL_FROM` 即可，不需要改代码。多个收件人用英文逗号分隔。
+- 改收件人：修改 GitHub Secret `MAIL_TO`；多个地址用英文逗号分隔。
+- 改发件地址或显示名称：修改 `MAIL_FROM`。显示名称用 `科技股市日报 <digest@example.com>` 格式。
+- `MAIL_FROM` 尖括号里的地址必须是 SMTP 服务允许的发件地址（通常与 `SMTP_USER` 一致），或 Resend 已验证域名下的地址。
+- 修改 secret 后重新运行 workflow 即可，不需要改代码或重新 push。
 
 ### 想调整邮件样式
 
