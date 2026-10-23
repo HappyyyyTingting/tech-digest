@@ -1,0 +1,110 @@
+name: Send digest email
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "digests/*.md"
+  workflow_dispatch:
+    inputs:
+      file:
+        description: "可选：指定日报路径，例如 digests/2026-10-23.md；留空则使用最新一份"
+        required: false
+        type: string
+      dry_run:
+        description: "只渲染预览，不发送邮件"
+        required: false
+        type: boolean
+        default: false
+
+# 同一天多次推送时排队执行，避免两封邮件同时发出。
+concurrency:
+  group: digest-email
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # 需要完整历史，才能用 push 事件的 before..after 找出本次改动的日报。
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Render and send
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE_SHA: ${{ github.event.before }}
+          AFTER_SHA: ${{ github.sha }}
+          INPUT_FILE: ${{ inputs.file }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          MAIL_TO: ${{ secrets.MAIL_TO }}
+          MAIL_FROM: ${{ secrets.MAIL_FROM }}
+          MAIL_REPLY_TO: ${{ secrets.MAIL_REPLY_TO }}
+          EMAIL_PROVIDER: ${{ secrets.EMAIL_PROVIDER }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          SMTP_SECURITY: ${{ secrets.SMTP_SECURITY }}
+        run: |
+          set -euo pipefail
+
+          files=()
+
+          if [ "${EVENT_NAME}" = "workflow_dispatch" ]; then
+            if [ -n "${INPUT_FILE}" ]; then
+              files+=("${INPUT_FILE}")
+            else
+              latest="$(find digests -maxdepth 1 -type f -name '*.md' ! -name '_TEMPLATE.md' | sort | tail -n 1)"
+              if [ -n "${latest}" ]; then
+                files+=("${latest}")
+              fi
+            fi
+          else
+            if [[ "${BEFORE_SHA}" =~ ^0+$ ]]; then
+              base="$(git rev-list --max-parents=0 "${AFTER_SHA}")"
+            else
+              base="${BEFORE_SHA}"
+            fi
+            while IFS= read -r file; do
+              files+=("${file}")
+            done < <(git diff --name-only "${base}" "${AFTER_SHA}" -- 'digests/*.md' | grep -v '_TEMPLATE.md' || true)
+          fi
+
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "本次没有发现新增或修改的日报，跳过发送。"
+            exit 0
+          fi
+
+          for file in "${files[@]}"; do
+            echo "处理：${file}"
+            if [ "${DRY_RUN}" = "true" ]; then
+              python scripts/send_email.py --file "${file}" --dry-run --out-dir artifacts
+            else
+              python scripts/send_email.py --file "${file}"
+            fi
+          done
+
+      - name: Upload preview
+        if: ${{ inputs.dry_run }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: email-preview
+          path: artifacts/
+          if-no-files-found: ignore
+          retention-days: 7
