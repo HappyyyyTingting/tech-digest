@@ -12,6 +12,10 @@ Sending is configured entirely through environment variables:
     MAIL_FROM            Sender, e.g. "Tech Digest <digest@example.com>"
     MAIL_REPLY_TO        Optional Reply-To address
 
+    AUDIO_URL            Optional MP3 URL shown as a listen button
+    AUDIO_DURATION       Optional audio length in seconds
+    PODCAST_FEED_URL     Optional podcast feed URL
+
     # Resend (recommended for GitHub Actions)
     RESEND_API_KEY
     EMAIL_PROVIDER=resend
@@ -89,6 +93,9 @@ class RenderedEmail:
     preheader: str
     html: str
     text: str
+    audio_url: str = ""
+    audio_duration: str = ""
+    podcast_url: str = ""
 
 
 class NonRetryableSendError(RuntimeError):
@@ -197,6 +204,65 @@ def format_date_cn(date_text: str) -> str:
         return date_text
     weekdays = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
     return f"{day.year}年{day.month}月{day.day}日 {weekdays[day.weekday()]}"
+
+
+def format_duration(seconds: object) -> str:
+    """Turn a duration in seconds into a short label such as 约 8 分钟."""
+    try:
+        value = int(float(str(seconds)))
+    except (TypeError, ValueError):
+        return ""
+    if value <= 0:
+        return ""
+    minutes = max(1, (value + 30) // 60)
+    return f"约 {minutes} 分钟"
+
+
+def _audio_cta_html(audio_url: str, duration_label: str, podcast_url: str) -> str:
+    """A listen button shown above the digest body."""
+    if not audio_url and not podcast_url:
+        return ""
+
+    buttons: list[str] = []
+    if audio_url:
+        label = "🎧 听本期日报"
+        if duration_label:
+            label += f" · {duration_label}"
+        buttons.append(
+            f'<a href="{html_lib.escape(audio_url, quote=True)}" '
+            'style="display:inline-block;background:#0b6bcb;color:#ffffff;'
+            "text-decoration:none;font-size:15px;font-weight:600;"
+            'padding:10px 18px;border-radius:999px;">'
+            f"{label}</a>"
+        )
+    if podcast_url:
+        buttons.append(
+            f'<a href="{html_lib.escape(podcast_url, quote=True)}" '
+            'style="display:inline-block;background:#ffffff;color:#0b5cad;'
+            "border:1px solid #b9cde4;text-decoration:none;font-size:15px;"
+            "font-weight:600;padding:10px 18px;border-radius:999px;"
+            'margin-left:8px;">订阅播客</a>'
+        )
+
+    return (
+        '<div style="margin:0 0 22px;padding:16px 18px;background:#f4f8fd;'
+        'border:1px solid #d8e4f2;border-radius:12px;">'
+        '<div style="font-size:13px;color:#5b6b7f;margin-bottom:10px;">'
+        "通勤路上，直接听这一期</div>"
+        f'{"".join(buttons)}</div>'
+    )
+
+
+def _audio_cta_text(audio_url: str, duration_label: str, podcast_url: str) -> str:
+    lines: list[str] = []
+    if audio_url:
+        suffix = f"（{duration_label}）" if duration_label else ""
+        lines.append(f"🎧 听本期日报{suffix}：{audio_url}")
+    if podcast_url:
+        lines.append(f"订阅播客：{podcast_url}")
+    if not lines:
+        return ""
+    return "\n".join(lines) + "\n\n——————————"
 
 
 def sanitize_html_links(html_text: str) -> str:
@@ -350,7 +416,13 @@ def wrap_email_html(title: str, date_cn: str, preheader: str, body_html: str) ->
 """
 
 
-def render_digest(path: Path, subject_override: str = "") -> RenderedEmail:
+def render_digest(
+    path: Path,
+    subject_override: str = "",
+    audio_url: str = "",
+    audio_duration: str = "",
+    podcast_url: str = "",
+) -> RenderedEmail:
     markdown_text = read_markdown(path)
     raw_title, body_markdown = extract_title(markdown_text)
     date_text = digest_date(path, raw_title) or date_cls.today().isoformat()
@@ -359,12 +431,22 @@ def render_digest(path: Path, subject_override: str = "") -> RenderedEmail:
     if not body_markdown.strip():
         body_markdown = "（今日日报暂无正文，请检查 Grok 的输出。）"
 
+    duration_label = format_duration(audio_duration)
+    cta_html = _audio_cta_html(audio_url, duration_label, podcast_url)
     body_html = markdown_to_html(body_markdown)
+    if cta_html:
+        body_html = cta_html + body_html
+
     date_cn = format_date_cn(date_text)
     preheader = extract_preheader(markdown_text)
     subject = _truncate(subject_override or title, MAX_SUBJECT_CHARS)
     html_doc = wrap_email_html(title, date_cn, preheader, body_html)
+
     text_body = markdown_to_text(markdown_text)
+    cta_text = _audio_cta_text(audio_url, duration_label, podcast_url)
+    if cta_text:
+        text_body = cta_text + "\n\n" + text_body
+
     return RenderedEmail(
         digest_path=path,
         title=title,
@@ -374,6 +456,9 @@ def render_digest(path: Path, subject_override: str = "") -> RenderedEmail:
         preheader=preheader,
         html=html_doc,
         text=text_body,
+        audio_url=audio_url,
+        audio_duration=duration_label,
+        podcast_url=podcast_url,
     )
 
 
@@ -588,6 +673,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--to", help="覆盖 MAIL_TO（仅建议本地测试使用）")
     parser.add_argument("--from", dest="from_addr", help="覆盖 MAIL_FROM（仅建议本地测试使用）")
     parser.add_argument("--subject", help="覆盖邮件主题（默认取日报第一个 H1）")
+    parser.add_argument(
+        "--audio-url",
+        help="本期语音链接，邮件顶部会显示播放按钮（默认读取 AUDIO_URL）",
+    )
+    parser.add_argument(
+        "--audio-duration",
+        help="本期音频秒数，用于显示『约 N 分钟』（默认读取 AUDIO_DURATION）",
+    )
+    parser.add_argument(
+        "--podcast-url",
+        help="播客订阅地址（默认读取 PODCAST_FEED_URL）",
+    )
     return parser.parse_args(argv)
 
 
@@ -595,7 +692,16 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     try:
         digest_path = resolve_digest_path(args.file)
-        rendered = render_digest(digest_path, args.subject or "")
+        audio_url = (args.audio_url or os.getenv("AUDIO_URL", "")).strip()
+        audio_duration = (args.audio_duration or os.getenv("AUDIO_DURATION", "")).strip()
+        podcast_url = (args.podcast_url or os.getenv("PODCAST_FEED_URL", "")).strip()
+        rendered = render_digest(
+            digest_path,
+            args.subject or "",
+            audio_url=audio_url,
+            audio_duration=audio_duration,
+            podcast_url=podcast_url,
+        )
 
         html_bytes = len(rendered.html.encode("utf-8"))
         if html_bytes > WARN_HTML_BYTES:
@@ -608,6 +714,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"日报文件：{_display_path(digest_path)}")
         print(f"邮件主题：{rendered.subject}")
         print(f"HTML 大小：{html_bytes / 1024:.1f} KB")
+        if rendered.audio_url:
+            print(f"语音链接：{rendered.audio_url}")
 
         if args.dry_run:
             out_dir = Path(args.out_dir).expanduser() if args.out_dir else ROOT

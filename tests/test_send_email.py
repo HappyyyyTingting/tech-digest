@@ -112,6 +112,41 @@ class RenderingTests(unittest.TestCase):
             self.assertIn("今日重要新闻", html_path.read_text(encoding="utf-8"))
             self.assertIn("今日重要新闻", text_path.read_text(encoding="utf-8"))
 
+    def test_audio_cta_is_rendered_in_html_and_text(self):
+        rendered = send_email.render_digest(
+            DIGEST,
+            audio_url="https://audio.example.com/2026-10-23.mp3",
+            audio_duration="495",
+            podcast_url="https://example.github.io/tech-digest/feed.xml",
+        )
+
+        self.assertIn("听本期日报", rendered.html)
+        self.assertIn("https://audio.example.com/2026-10-23.mp3", rendered.html)
+        self.assertIn("约 8 分钟", rendered.html)
+        self.assertIn("订阅播客", rendered.html)
+        self.assertIn(
+            "https://example.github.io/tech-digest/feed.xml", rendered.html
+        )
+
+        self.assertIn("听本期日报（约 8 分钟）", rendered.text)
+        self.assertIn("https://audio.example.com/2026-10-23.mp3", rendered.text)
+        self.assertIn("订阅播客", rendered.text)
+        self.assertEqual(rendered.audio_url, "https://audio.example.com/2026-10-23.mp3")
+
+    def test_no_audio_cta_without_audio(self):
+        rendered = send_email.render_digest(DIGEST)
+        self.assertNotIn("听本期日报", rendered.html)
+        self.assertNotIn("订阅播客", rendered.html)
+        self.assertNotIn("听本期日报", rendered.text)
+
+    def test_format_duration(self):
+        self.assertEqual(send_email.format_duration(495), "约 8 分钟")
+        self.assertEqual(send_email.format_duration(510), "约 9 分钟")
+        self.assertEqual(send_email.format_duration("480"), "约 8 分钟")
+        self.assertEqual(send_email.format_duration(""), "")
+        self.assertEqual(send_email.format_duration("abc"), "")
+        self.assertEqual(send_email.format_duration(0), "")
+
     def test_resolve_missing_file(self):
         with self.assertRaises(FileNotFoundError):
             send_email.resolve_digest_path("digests/not-found.md")

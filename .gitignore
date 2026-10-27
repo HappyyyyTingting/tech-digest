@@ -5,3 +5,6 @@ __pycache__/
 email_preview.html
 email_preview.txt
 artifacts/
+audio/
+site/index.html
+site/feed.xml
