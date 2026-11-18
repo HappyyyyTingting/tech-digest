@@ -4,7 +4,7 @@
 
 Grok Automation 搜索过去 24 小时 X 上的科技巨头、半导体和 AI 产业链动态，写成中文 Markdown 日报并提交到本仓库；GitHub Actions 在收到新日报后，把完整内容渲染成响应式 HTML 邮件（同时生成纯文本版本）发送到邮箱。
 
-每份日报还会用 edge-tts 合成中文语音，上传到 Cloudflare R2，并在 GitHub Pages 上生成播放页和播客 feed——通勤路上可以直接听。
+每份日报还会用 edge-tts 合成中文语音。MP3 不进 git，也不上传到持久存储：workflow 用 `actions/cache` 在两次运行之间传递 `audio/`，只保留最近 7 天，由 GitHub Pages 发布播放页和播客 feed——通勤路上可以直接听。
 
 [![Send digest email](https://github.com/HappyyyyTingting/tech-digest/actions/workflows/send-email.yml/badge.svg)](https://github.com/HappyyyyTingting/tech-digest/actions/workflows/send-email.yml)
 
@@ -13,7 +13,7 @@ Grok Automation 搜索过去 24 小时 X 上的科技巨头、半导体和 AI �
 ## 特性
 
 - **每日自动更新**：Grok 按计划生成日报，Git 保存历史版本。
-- **语音版日报**：edge-tts 合成 MP3（约 8 分钟），邮件顶部一键收听；同一份音频自动发布为播客 feed，可在小宇宙、Apple Podcasts、Overcast 等客户端订阅。
+- **语音版日报**：edge-tts 合成 MP3（约 8 分钟），邮件顶部一键收听；音频由 Pages 发布，播放页和播客 feed 只保留最近 7 天（`AUDIO_RETENTION_DAYS` 可调），已下载到播客客户端的剧集不受影响。
 - **完整邮件正文**：不截断，不含「Continue Reading」。
 - **手机友好**：单栏布局，最大宽度 640px，16px 字号，1.75 行高。
 - **SMTP / Resend 双支持**：凭据保存在 GitHub Actions Secrets，不写进仓库。
@@ -27,8 +27,8 @@ Grok Automation 搜索过去 24 小时 X 上的科技巨头、半导体和 AI �
 Grok Automation（每天）
   → digests/YYYY-MM-DD.md
   → GitHub Actions（push 触发）
-  → scripts/make_audio.py   Markdown → 口语稿 → MP3 → Cloudflare R2
-  → scripts/build_site.py   播放页 + 播客 feed → GitHub Pages
+  → scripts/make_audio.py   Markdown → 口语稿 → MP3（actions/cache 保留最近 7 天）
+  → scripts/build_site.py   播放页 + 播客 feed（含 mp3）→ GitHub Pages
   → scripts/send_email.py   响应式 HTML + 纯文本（含语音链接）
   → 邮箱
 ```
@@ -57,10 +57,8 @@ open email_preview.html
 
 # 生成播放页和播客 feed（本地用示例地址预览）
 .venv/bin/python scripts/build_site.py \
-  --audio-base-url https://audio.example.com \
   --site-url https://example.github.io/tech-digest/ \
-  --site-dir /tmp/tech-digest-site \
-  --no-head
+  --site-dir /tmp/tech-digest-site
 open /tmp/tech-digest-site/index.html
 ```
 
@@ -122,19 +120,12 @@ unset SMTP_PASSWORD
 
 ### 语音版与 GitHub Pages（可选）
 
-音频存放在 **Cloudflare R2**（10GB 免费额度，按每天约 3MB 可用十年以上），播放页和播客 feed 由 **GitHub Pages** 托管。
+MP3 不进入 git，也不上传到持久存储：
 
-Secrets：
-
-| Secret | 说明 |
-|---|---|
-| `R2_ACCOUNT_ID` | Cloudflare 账户 ID |
-| `R2_BUCKET` | 存放 MP3 的 bucket 名称 |
-| `R2_ACCESS_KEY_ID` | R2 API token 的 Access Key ID |
-| `R2_SECRET_ACCESS_KEY` | R2 API token 的 Secret Access Key |
-| `AUDIO_BASE_URL` | bucket 的公开访问前缀，例如 `https://audio.example.com`（必填，只填域名、不要带路径） |
-
-`AUDIO_BASE_URL` 本来就是公开地址（会出现在邮件按钮、播放页和 feed 里），放进 Secret 只是为了让 Actions 日志自动打码。
+- workflow 用 `actions/cache` 在两次运行之间传递 `audio/`；
+- 每次生成后清理 `AUDIO_RETENTION_DAYS`（默认 7）天前的 mp3 和元数据；
+- 播放页和播客 feed 由 **GitHub Pages** 托管，站点只带最近一周的 mp3；
+- 音频步骤失败不影响当天的文字推送。
 
 Variables（`Settings → Secrets and variables → Actions → Variables`）：
 
@@ -144,8 +135,11 @@ Variables（`Settings → Secrets and variables → Actions → Variables`）：
 | `PODCAST_FEED_URL` | 邮件里的订阅链接；默认由 `SITE_URL` 推导 |
 | `TTS_VOICE` | 音色，默认 `zh-CN-XiaoxiaoNeural` |
 | `TTS_RATE` | 语速，默认 `+0%` |
+| `AUDIO_RETENTION_DAYS` | 音频保留天数，默认 7；设为 0 表示不清理 |
 
-另外需要在 `Settings → Pages` 把 **Source** 设为 **GitHub Actions**。完整步骤（R2 公共访问、API token、播客订阅）见 [docs/setup.md](docs/setup.md)。
+只需要在 `Settings → Pages` 把 **Source** 设为 **GitHub Actions**，不需要 R2 的账号或密钥。Cloudflare R2 仍保留为备用方案（`make_audio.py --upload` + `AUDIO_BASE_URL`），完整步骤见 [docs/setup.md](docs/setup.md)。
+
+> 缓存可能被 GitHub 回收；一旦被清空，旧音频会从站点和 feed 消失。音频只给自己听的话，最近一周通常够用。
 
 ### 发件人显示名称
 
@@ -178,12 +172,12 @@ Variables（`Settings → Secrets and variables → Actions → Variables`）：
 ```text
 .github/workflows/send-email.yml   # push / workflow_dispatch 触发；音频、Pages、邮件
 digests/                            # 每日日报与格式模板
-scripts/make_audio.py               # Markdown → 口语稿 → MP3 → R2
-scripts/build_site.py               # 播放页 index.html + 播客 feed.xml
+scripts/make_audio.py               # Markdown → 口语稿 → MP3（本地保留，7 天清理）
+scripts/build_site.py               # 播放页 index.html + 播客 feed.xml + 音频拷贝
 scripts/send_email.py               # 渲染与发送（含语音链接）
 tests/                              # 单元测试
-requirements.txt                    # mistune、edge-tts、boto3、mutagen
-docs/setup.md                       # Grok、SMTP、Resend、R2、Pages 详细配置与排查
+requirements.txt                    # mistune、edge-tts、boto3（R2 备用）、mutagen
+docs/setup.md                       # Grok、SMTP、Resend、Pages、R2 备用详细配置
 ```
 
 ## 开发
@@ -207,15 +201,17 @@ docs/setup.md                       # Grok、SMTP、Resend、R2、Pages 详细�
 `make_audio.py`：
 
 - `--voice` / `--rate`：音色和语速（默认 `zh-CN-XiaoxiaoNeural` / `+0%`）。
+- `--retention-days`：生成后清理多少天前的音频，默认 7（也读 `AUDIO_RETENTION_DAYS`）；0 表示不清理。
+- `--no-prune`：本次不清理过期文件。
 - `--dry-run`：只输出字数和预计时长，不合成。
 - `--text-out <path>`：把清洗后的口语稿写出来，便于检查。
-- `--upload`：生成后上传到 R2（需要 `R2_*` 和 `AUDIO_BASE_URL`）。
+- `--upload`：生成后上传到 R2（备用方案，需要 `R2_*` 和 `AUDIO_BASE_URL`）。
 
 `build_site.py`：
 
-- `--audio-base-url`：MP3 的公开前缀（也读 `AUDIO_BASE_URL`）。
+- `--audio-base-url`：MP3 的公开前缀；默认使用站点地址下的 `audio/` 目录。
 - `--site-url` / `--repo-url`：站点和仓库地址，默认按 GitHub 仓库推导。
-- `--no-head`：不检查远程音频是否存在，离线预览用。
+- `--no-head`：已废弃，保留以兼容旧命令。
 - `--limit`：只保留最近 N 期。
 
 ## 文档

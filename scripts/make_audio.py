@@ -6,7 +6,12 @@ Examples:
     python scripts/make_audio.py --file digests/2026-10-27.md
     python scripts/make_audio.py --latest --upload
 
-Uploading is configured through environment variables (Cloudflare R2):
+By default the MP3 stays in ``audio/`` and is published through GitHub Pages,
+which the workflow carries between runs with actions/cache. Generated files
+older than ``--retention-days`` (default 7) are pruned on each run.
+
+Uploading to Cloudflare R2 is still available as a fallback and is configured
+through environment variables:
 
     R2_ACCOUNT_ID
     R2_BUCKET
@@ -18,10 +23,10 @@ TTS settings:
 
     TTS_VOICE             Defaults to zh-CN-XiaoxiaoNeural
     TTS_RATE              Defaults to +0%
+    AUDIO_RETENTION_DAYS  Defaults to 7
 
 The script writes audio/<date>.mp3 and audio/<date>.json. The JSON records the
-duration, byte size and public URL so the site builder and email step can use
-it without another network call.
+duration, byte size and (only after an R2 upload) the public URL.
 """
 
 from __future__ import annotations
@@ -33,6 +38,8 @@ import os
 import re
 import sys
 import time
+from datetime import date as date_cls
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from send_email import (
@@ -46,7 +53,11 @@ from send_email import (
 DEFAULT_VOICE = "zh-CN-XiaoxiaoNeural"
 DEFAULT_RATE = "+0%"
 DEFAULT_OUT_DIR = "audio"
+DEFAULT_RETENTION_DAYS = 7
 BYTES_PER_SECOND_48KBPS = 6000
+TZ_SHANGHAI = timezone(timedelta(hours=8))
+
+_DIGEST_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 _EMOJI_RE = re.compile(
     r"[\U0001F000-\U0001FAFF☀-➿️‍]+"
@@ -188,6 +199,27 @@ def synthesize(text: str, voice: str, rate: str, out_path: Path, attempts: int =
     raise RuntimeError(f"语音合成失败（已重试 {attempts} 次）：{last_error}") from last_error
 
 
+def prune_audio(directory: Path, keep_days: int, today: date_cls) -> list[str]:
+    """Delete MP3s and metadata older than ``keep_days``; return removed names."""
+    if keep_days <= 0 or not directory.is_dir():
+        return []
+    cutoff = today - timedelta(days=keep_days)
+    removed: list[str] = []
+    for path in sorted(directory.iterdir()):
+        if not path.is_file() or path.suffix not in {".mp3", ".json"}:
+            continue
+        if not _DIGEST_DATE_RE.fullmatch(path.stem):
+            continue
+        try:
+            file_date = date_cls.fromisoformat(path.stem)
+        except ValueError:
+            continue
+        if file_date < cutoff:
+            path.unlink()
+            removed.append(path.name)
+    return removed
+
+
 def upload_to_r2(local_path: Path, key: str) -> str:
     """Upload to Cloudflare R2 and return the public URL."""
     import boto3
@@ -249,7 +281,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=DEFAULT_OUT_DIR,
         help=f"输出目录（默认 {DEFAULT_OUT_DIR}/）",
     )
-    parser.add_argument("--upload", action="store_true", help="生成后上传到 Cloudflare R2")
+    parser.add_argument("--upload", action="store_true", help="生成后上传到 Cloudflare R2（备用方案）")
+    parser.add_argument(
+        "--retention-days",
+        type=int,
+        default=int(os.getenv("AUDIO_RETENTION_DAYS") or DEFAULT_RETENTION_DAYS),
+        help=f"音频保留天数（默认 {DEFAULT_RETENTION_DAYS}，0 表示不清理）",
+    )
+    parser.add_argument("--no-prune", action="store_true", help="合成后不清理过期文件")
     parser.add_argument("--dry-run", action="store_true", help="只输出口语稿统计，不合成")
     parser.add_argument("--text-out", default="", help="可选：把口语稿写入指定文件，便于检查")
     return parser.parse_args(argv)
@@ -325,6 +364,11 @@ def main(argv: list[str] | None = None) -> int:
 
         print(f"音频：{mp3_path}（{size / 1024:.0f} KB，{duration / 60:.1f} 分钟）")
         print(f"元数据：{meta_path}")
+
+        if not args.no_prune:
+            removed = prune_audio(out_dir, args.retention_days, datetime.now(TZ_SHANGHAI).date())
+            if removed:
+                print(f"已清理 {len(removed)} 个过期文件：{', '.join(removed)}")
         return 0
     except (FileNotFoundError, ValueError, RuntimeError) as exc:
         print(f"错误：{exc}", file=sys.stderr)

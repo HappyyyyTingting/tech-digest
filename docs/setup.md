@@ -4,7 +4,7 @@
 
 1. **Grok Automation** 每天搜索 X 上的科技动态，把中文日报写入 `digests/YYYY-MM-DD.md`。
 2. **GitHub Actions** 在日报更新后，把 Markdown 完整渲染成 HTML 邮件和纯文本邮件并发送。
-3. **GitHub Actions（可选）** 同一份日报合成中文语音，上传到 Cloudflare R2，并发布到 GitHub Pages 的播放页和播客 feed。
+3. **GitHub Actions（可选）** 同一份日报合成中文语音，MP3 由 `actions/cache` 保留最近 7 天，并发布到 GitHub Pages 的播放页和播客 feed。
 
 本文档说明首次配置、邮件服务切换、语音版配置和排错。日常使用和本地命令见 [README](../README.md)。
 
@@ -14,7 +14,7 @@
 Grok Automation（每天）
   → digests/YYYY-MM-DD.md
   → GitHub Actions（push 触发，或手动触发）
-  → scripts/make_audio.py  → MP3 → Cloudflare R2
+  → scripts/make_audio.py  → MP3（actions/cache 保留 7 天，不进 git）
   → scripts/build_site.py  → 播放页 + feed.xml → GitHub Pages
   → scripts/send_email.py  → 响应式 HTML + 纯文本（含语音链接）
   → 邮箱
@@ -175,45 +175,25 @@ SMTP_SECURITY
 - 当前脚本只打印日报路径、邮件主题、HTML 大小和 provider，不打印邮箱、授权码或 API key。
 - 不要把授权码、API key 写进 README、Markdown 或代码；建议使用专用发件邮箱和可撤销的凭据。
 
-语音版还会读取 `R2_ACCOUNT_ID`、`R2_BUCKET`、`R2_ACCESS_KEY_ID`、`R2_SECRET_ACCESS_KEY` 和 `AUDIO_BASE_URL` 等 Secrets，见下一节。
+语音版默认不需要额外 Secrets；R2 只是备用方案，见下一节末尾。
 
-## 语音版（可选：Cloudflare R2 + GitHub Pages）
+## 语音版（可选：GitHub Pages + actions/cache）
 
-语音功能是可选的。没有配置 R2 时，workflow 的音频步骤会失败，但不会影响邮件；邮件顶部只是不会出现播放按钮。
+语音功能是可选的。音频没生成或合成失败时，邮件照常发送，只是顶部没有播放按钮。
 
 ### 原理
 
 ```text
 digests/YYYY-MM-DD.md
-  → scripts/make_audio.py   清洗成口语稿（去掉链接、表格符号）→ edge-tts → MP3
-  → Cloudflare R2           https://<公开域名>/YYYY-MM-DD.mp3
-  → scripts/build_site.py   扫描 digests/ + audio/*.json → index.html + feed.xml
+  → scripts/make_audio.py   清洗成口语稿（去掉链接、表格符号）→ edge-tts → audio/*.mp3
+  → actions/cache           在两次运行之间传递 audio/（不进 git，只保留最近 7 天）
+  → scripts/build_site.py   扫描 digests/ + audio/*.mp3 → index.html + feed.xml + site/audio/
   → GitHub Pages            https://<owner>.github.io/<repo>/
 ```
 
-### 1. 创建 R2 bucket
+### 1. 配置 Variables
 
-1. 登录 <https://dash.cloudflare.com>，进入 **R2**，创建 bucket，例如 `tech-digest-audio`。
-2. 打开 bucket 的 **Settings → Public access**：
-   - 临时使用可以启用 **R2.dev subdomain**，得到 `https://pub-xxxx.r2.dev`。
-   - 长期使用建议绑定自定义域名（例如 `audio.example.com`），播客客户端拉流更稳定。
-3. 在 **Manage R2 API Tokens** 创建 token，权限选 **Object Read & Write**，范围只选这个 bucket。记下 Access Key ID 和 Secret Access Key。
-
-### 2. 配置 Secrets 和 Variables
-
-Secrets（`Settings → Secrets and variables → Actions → Secrets`）：
-
-| 名称 | 值 |
-|---|---|
-| `R2_ACCOUNT_ID` | Cloudflare 账户 ID（R2 概览页右侧可见） |
-| `R2_BUCKET` | bucket 名称，例如 `tech-digest-audio` |
-| `R2_ACCESS_KEY_ID` | API token 的 Access Key ID |
-| `R2_SECRET_ACCESS_KEY` | API token 的 Secret Access Key |
-| `AUDIO_BASE_URL` | 公开访问前缀，例如 `https://audio.example.com` 或 `https://pub-xxxx.r2.dev`；只填域名，不要带路径 |
-
-> `AUDIO_BASE_URL` 是公开地址，会出现在邮件按钮、播放页和 feed 里；放在 Secrets 只是为了在 Actions 日志中自动打码。
-
-Variables（同一页面的 **Variables** 标签）：
+Variables（`Settings → Secrets and variables → Actions → Variables`）：
 
 | 名称 | 必需 | 值 |
 |---|---|---|
@@ -221,10 +201,11 @@ Variables（同一页面的 **Variables** 标签）：
 | `PODCAST_FEED_URL` | 否 | 邮件里的订阅链接；默认 `SITE_URL + feed.xml` |
 | `TTS_VOICE` | 否 | 音色，默认 `zh-CN-XiaoxiaoNeural` |
 | `TTS_RATE` | 否 | 语速，默认 `+0%`，可设为 `+10%` |
+| `AUDIO_RETENTION_DAYS` | 否 | 音频保留天数，默认 7；设为 0 表示不清理 |
 
-> MP3 从不进入 git：Actions 每次都是全新 checkout，音频只存在 R2，仓库不会逐年膨胀。
+> MP3 从不进入 git，也不上传到持久存储：Actions 每次都是全新 checkout，音频由 `actions/cache` 在运行之间传递，站点只发布缓存里现存的 mp3。缓存被 GitHub 回收后，旧音频会从站点和 feed 消失；只给自己听的话，最近一周通常够用。
 
-### 3. 开启 GitHub Pages
+### 2. 开启 GitHub Pages
 
 `Settings → Pages → Build and deployment → Source` 选择 **GitHub Actions**。workflow 会用 `upload-pages-artifact` + `deploy-pages` 发布 `site/` 目录。
 
@@ -237,41 +218,51 @@ Variables（同一页面的 **Variables** 标签）：
 
 首次配置完成后，在 Actions 页面手动运行一次 workflow，并勾选 **`audio_only`**，生成第一期的音频和站点（不会重复发邮件）。
 
-### 4. 订阅播客
+### 3. 订阅播客
 
 在小宇宙、Apple Podcasts、Overcast、Pocket Casts 里选择「通过 URL 添加节目 / Add a Show by URL」，粘贴上面的 feed 地址。之后每天的新音频会自动出现在节目列表里，支持倍速、断点续播、锁屏和离线下载。
 
+> feed 只列最近一周的节目。已经下载到客户端的剧集仍可离线听，但超过保留期的节目可能无法再拉流。想长期留档就切回 R2，或把 `AUDIO_RETENTION_DAYS` 调大（缓存总量上限 10GB）。
+
 > feed 和播放页是公开的，即使仓库本身是私有的，GitHub Pages 站点默认也对所有人可见。如果日报不打算公开，可以把 `SITE_URL` 换成不可猜的路径，或改用带访问控制的托管方式（RSS 客户端不会跟随登录跳转）。
 
-### 5. 本地生成与检查
+### 4. 本地生成与检查
 
 ```bash
 # 只看口语稿（不联网、不出音频）
 .venv/bin/python scripts/make_audio.py --latest --dry-run --text-out /tmp/spoken.txt
 
-# 生成 MP3
+# 生成 MP3（默认清理 7 天前的文件；--retention-days 0 不清理）
 .venv/bin/python scripts/make_audio.py --latest
 
-# 上传（需要先 export R2_* 和 AUDIO_BASE_URL）
-.venv/bin/python scripts/make_audio.py --latest --upload
-
-# 本地生成播放页（--no-head 不检查远端文件）
+# 本地生成播放页（默认使用站点地址下的 audio/ 目录）
 .venv/bin/python scripts/build_site.py \
-  --audio-base-url https://audio.example.com \
   --site-url https://example.github.io/tech-digest/ \
-  --site-dir /tmp/tech-digest-site \
-  --no-head
+  --site-dir /tmp/tech-digest-site
 open /tmp/tech-digest-site/index.html
 ```
 
-### 6. 语音相关排错
+### 5. 语音相关排错
 
-- **音频步骤失败，邮件仍正常**：这是设计。看日志里的 `语音合成失败` 或 `缺少 R2 配置`。
-- **音频生成了但链接 404**：确认 R2 bucket 已开启公共访问，且 `AUDIO_BASE_URL` 和公开域名完全一致。
+- **音频步骤失败，邮件仍正常**：这是设计。看日志里的 `语音合成失败`。
+- **音频生成了但链接 404**：确认 Pages 部署成功；workflow 只在部署成功时才把音频链接写进邮件。
+- **某天的音频从站点消失了**：超过 `AUDIO_RETENTION_DAYS`，或 actions/cache 被 GitHub 回收，属于预期行为。
 - **edge-tts 偶尔失败**：脚本会自动重试 3 次；仍失败可以重跑 workflow。
 - **想换音色**：设置 `TTS_VOICE`，例如 `zh-CN-YunxiNeural`（男声）、`zh-CN-XiaoyiNeural`。可用音色见 `edge-tts --list-voices`。
-- **补历史音频**：手动触发时把 `file` 填成某一天的路径，并勾选 `audio_only`，只生成音频和站点、不重复发邮件。一次处理一天，多跑几次即可。
+- **补历史音频**：手动触发时把 `file` 填成某一天的路径，并勾选 `audio_only`，只生成音频和站点、不重复发邮件。注意超过保留期的日期会立刻被清理，不会留在站点。
 - **想调整朗读速度**：设置 `TTS_RATE`，例如 `+10%`。
+
+### 6. 备用方案：Cloudflare R2
+
+如果缓存方案不好用（想长期留档、担心缓存被回收），可以切回 R2：
+
+1. 登录 <https://dash.cloudflare.com>，进入 **R2**，创建 bucket，例如 `tech-digest-audio`。
+2. 打开 bucket 的 **Settings → Public access**：临时使用可以启用 **R2.dev subdomain**；长期使用建议绑定自定义域名。
+3. 在 **Manage R2 API Tokens** 创建 token，权限选 **Object Read & Write**，范围只选这个 bucket。
+4. 配置 Secrets：`R2_ACCOUNT_ID`、`R2_BUCKET`、`R2_ACCESS_KEY_ID`、`R2_SECRET_ACCESS_KEY`、`AUDIO_BASE_URL`。
+5. 在 workflow 的 **Generate audio** 步骤给 `make_audio.py` 加上 `--upload`，并在 **Build audio site** 步骤传入 `AUDIO_BASE_URL`。
+
+元数据里的 `url` 会优先于本地 mp3，`build_site.py` 和邮件都会直接使用 R2 地址。
 
 ## 4. 触发方式
 

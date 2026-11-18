@@ -1,5 +1,7 @@
 import sys
+import tempfile
 import unittest
+from datetime import date
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -68,6 +70,37 @@ class SpeechTextTests(unittest.TestCase):
         self.assertNotIn("|", text)
         self.assertNotIn("#", text)
         self.assertNotIn("**", text)
+
+
+class PruneAudioTests(unittest.TestCase):
+    def test_prune_removes_files_older_than_retention(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            for name in (
+                "2026-11-10.mp3",
+                "2026-11-10.json",
+                "2026-11-11.mp3",
+                "2026-11-18.mp3",
+                "notes.json",
+            ):
+                (directory / name).write_text("x", encoding="utf-8")
+
+            removed = make_audio.prune_audio(directory, 7, date(2026, 11, 18))
+
+            self.assertEqual(sorted(removed), ["2026-11-10.json", "2026-11-10.mp3"])
+            self.assertTrue((directory / "2026-11-11.mp3").is_file())
+            self.assertTrue((directory / "2026-11-18.mp3").is_file())
+            self.assertTrue((directory / "notes.json").is_file())
+
+    def test_prune_disabled_keeps_everything(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            (directory / "2026-01-01.mp3").write_text("x", encoding="utf-8")
+
+            removed = make_audio.prune_audio(directory, 0, date(2026, 11, 18))
+
+            self.assertEqual(removed, [])
+            self.assertTrue((directory / "2026-01-01.mp3").is_file())
 
 
 if __name__ == "__main__":

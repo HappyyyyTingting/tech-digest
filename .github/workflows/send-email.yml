@@ -102,33 +102,48 @@ jobs:
           } >> "$GITHUB_OUTPUT"
           printf '待处理：%s\n' "${files[@]}"
 
+      # 音频不进 git：用 actions/cache 在两次运行之间传递 audio/，
+      # 每次生成后清理 AUDIO_RETENTION_DAYS（默认 7）天前的文件，站点只带最近一周。
+      # key 带上 run_id：GitHub 缓存不可变，若只用日期，同一天重跑会命中旧缓存、
+      # 新生成的 mp3 存不进去。
+      - name: Restore audio cache
+        if: steps.files.outputs.list != ''
+        uses: actions/cache/restore@v6
+        with:
+          path: audio
+          key: digest-audio-${{ github.run_id }}
+          restore-keys: |
+            digest-audio-
+
       # 语音是可选功能：这一步失败不会阻止邮件发送。
-      - name: Generate and upload audio
+      - name: Generate audio
         if: steps.files.outputs.list != ''
         id: audio
         continue-on-error: true
         env:
           FILES: ${{ steps.files.outputs.list }}
-          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
-          R2_BUCKET: ${{ secrets.R2_BUCKET }}
-          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          AUDIO_BASE_URL: ${{ secrets.AUDIO_BASE_URL }}
           TTS_VOICE: ${{ vars.TTS_VOICE }}
           TTS_RATE: ${{ vars.TTS_RATE }}
+          AUDIO_RETENTION_DAYS: ${{ vars.AUDIO_RETENTION_DAYS }}
         run: |
           set -euo pipefail
           while IFS= read -r file; do
             [ -n "${file}" ] || continue
-            python scripts/make_audio.py --file "${file}" --out-dir audio --upload
+            python scripts/make_audio.py --file "${file}" --out-dir audio
           done <<< "${FILES}"
+
+      - name: Save audio cache
+        if: steps.audio.outcome == 'success'
+        uses: actions/cache/save@v6
+        with:
+          path: audio
+          key: digest-audio-${{ github.run_id }}
 
       - name: Build audio site
         if: steps.files.outputs.list != ''
         id: site
         continue-on-error: true
         env:
-          AUDIO_BASE_URL: ${{ secrets.AUDIO_BASE_URL }}
           SITE_URL: ${{ vars.SITE_URL }}
         run: python scripts/build_site.py --audio-dir audio --site-dir site
 
@@ -165,16 +180,18 @@ jobs:
         run: |
           set -euo pipefail
 
+          site_base="${SITE_URL:-}"
+          if [ -z "${site_base}" ] && [ -n "${GITHUB_REPOSITORY:-}" ]; then
+            owner="${GITHUB_REPOSITORY%%/*}"
+            repo="${GITHUB_REPOSITORY#*/}"
+            site_base="https://${owner,,}.github.io/${repo}/"
+          fi
+
           podcast_url=""
           if [ "${DEPLOY_OUTCOME}" = "success" ]; then
             podcast_url="${PODCAST_FEED_URL:-}"
-            if [ -z "${podcast_url}" ] && [ -n "${SITE_URL:-}" ]; then
-              podcast_url="${SITE_URL%/}/feed.xml"
-            fi
-            if [ -z "${podcast_url}" ] && [ -n "${GITHUB_REPOSITORY:-}" ]; then
-              owner="${GITHUB_REPOSITORY%%/*}"
-              repo="${GITHUB_REPOSITORY#*/}"
-              podcast_url="https://${owner,,}.github.io/${repo}/feed.xml"
+            if [ -z "${podcast_url}" ] && [ -n "${site_base}" ]; then
+              podcast_url="${site_base%/}/feed.xml"
             fi
           fi
 
@@ -185,8 +202,11 @@ jobs:
             audio_url=""
             audio_duration=""
             if [ -f "${meta}" ]; then
-              audio_url="$(python -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d.get("url") or "")' "${meta}")"
               audio_duration="$(python -c 'import json,sys; d=json.load(open(sys.argv[1])); print(int(float(d.get("duration") or 0)))' "${meta}")"
+            fi
+            # 音频改由 Pages 托管；部署失败时不发链接，避免 404。
+            if [ "${DEPLOY_OUTCOME}" = "success" ] && [ -n "${site_base}" ] && [ -f "audio/${date}.mp3" ]; then
+              audio_url="${site_base%/}/audio/${date}.mp3"
             fi
 
             args=(--file "${file}")

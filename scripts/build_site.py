@@ -4,11 +4,12 @@
 Examples:
     python scripts/build_site.py --site-dir site
     python scripts/build_site.py --audio-base-url https://audio.example.com \
-        --site-url https://example.github.io/tech-digest/ --no-head
+        --site-url https://example.github.io/tech-digest/
 
-The script scans digests/*.md, joins each digest with its audio metadata in
-audio/<date>.json, and writes site/index.html plus site/feed.xml. Episodes whose
-audio does not exist yet are skipped when --no-head is not set.
+The script scans digests/*.md and joins each one with its audio in
+audio/<date>.mp3 (or audio/<date>.json for a remote upload). Local MP3s are
+copied into site/audio/ so GitHub Pages can serve them. Episodes without any
+audio are skipped, which is how the site keeps roughly the last week.
 """
 
 from __future__ import annotations
@@ -18,11 +19,9 @@ import html
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
-import urllib.error
-import urllib.request
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import date as date_cls
 from datetime import datetime, time as time_cls, timedelta, timezone
@@ -39,7 +38,6 @@ ET.register_namespace("itunes", ITUNES_NS)
 DEFAULT_TITLE = "科技股市入门日报"
 DEFAULT_DESCRIPTION = "每天一份科技股市入门日报，通勤路上直接听。"
 TZ_SHANGHAI = timezone(timedelta(hours=8))
-HEAD_WORKERS = 8
 
 
 @dataclass
@@ -76,18 +74,8 @@ def _read_metadata(audio_dir: Path, date_text: str) -> dict:
 
 
 def head_size(url: str, timeout: float = 8.0) -> int | None:
-    """Return the file size, or None when the object does not exist."""
-    request = urllib.request.Request(url, method="HEAD")
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            length = response.headers.get("Content-Length", "")
-            return int(length) if length.isdigit() else 0
-    except urllib.error.HTTPError as exc:
-        if exc.code in {403, 404}:
-            return None
-        return 0
-    except Exception:  # noqa: BLE001 - network failure should not drop episodes
-        return 0
+    """Deprecated: kept for older callers; audio is now served from the site."""
+    return 0
 
 
 def _derive_repo() -> str:
@@ -127,33 +115,40 @@ def load_episodes(
     audio_dir: Path,
     audio_base_url: str,
     *,
-    head: bool = True,
     limit: int = 0,
     repo_url: str = "",
 ) -> list[Episode]:
+    """Join digests with their audio; episodes without audio are skipped.
+
+    A local ``audio/<date>.mp3`` is published from the site itself, so its URL
+    is derived from ``audio_base_url``. A metadata ``url`` (an R2 upload, used
+    as a fallback) wins when present.
+    """
     base = audio_base_url.rstrip("/")
     episodes: list[Episode] = []
-    uploaded: set[str] = set()
 
     for path in sorted(digests_dir.glob("*.md")):
         date_text = path.stem
         if path.name.startswith("_") or not DIGEST_DATE_RE.fullmatch(date_text):
             continue
 
+        local_mp3 = audio_dir / f"{date_text}.mp3"
+        metadata = _read_metadata(audio_dir, date_text)
+        remote_url = str(metadata.get("url") or "").strip()
+        if remote_url:
+            audio_url = remote_url
+        elif local_mp3.is_file() and base:
+            audio_url = f"{base}/{date_text}.mp3"
+        else:
+            continue
+
         markdown_text = read_markdown(path)
         title, _ = extract_title(markdown_text)
         summary = extract_preheader(markdown_text)
-        audio_url = f"{base}/{date_text}.mp3"
         source_url = f"{repo_url}/blob/main/digests/{path.name}" if repo_url else ""
 
-        metadata = _read_metadata(audio_dir, date_text)
         size = int(metadata.get("bytes") or 0)
         duration = int(float(metadata.get("duration") or 0))
-        if metadata.get("url"):
-            audio_url = str(metadata["url"])
-            uploaded.add(date_text)
-
-        local_mp3 = audio_dir / f"{date_text}.mp3"
         if local_mp3.is_file():
             size = size or local_mp3.stat().st_size
             if not duration:
@@ -170,22 +165,6 @@ def load_episodes(
                 duration=duration,
             )
         )
-
-    if head:
-        # Only trust an object as present when this run uploaded it, or when
-        # HEAD succeeds. This keeps a failed upload out of the feed instead of
-        # publishing a dead link just because a local MP3 exists.
-        checked = [episode for episode in episodes if episode.date not in uploaded]
-        if checked:
-            with ThreadPoolExecutor(max_workers=HEAD_WORKERS) as pool:
-                sizes = list(pool.map(lambda item: head_size(item.audio_url), checked))
-            missing = set()
-            for episode, size in zip(checked, sizes):
-                if size is None:
-                    missing.add(episode.date)
-                else:
-                    episode.bytes = episode.bytes or size
-            episodes = [episode for episode in episodes if episode.date not in missing]
 
     episodes.sort(key=lambda item: item.date, reverse=True)
     if limit > 0:
@@ -392,6 +371,20 @@ def render_index(
 """
 
 
+def copy_audio(audio_dir: Path, site_dir: Path) -> list[str]:
+    """Copy local MP3s into site/audio so Pages can serve them."""
+    target = site_dir / "audio"
+    if target.is_dir():
+        shutil.rmtree(target)
+    copied: list[str] = []
+    if audio_dir.is_dir():
+        target.mkdir(parents=True, exist_ok=True)
+        for source in sorted(audio_dir.glob("*.mp3")):
+            shutil.copy2(source, target / source.name)
+            copied.append(source.name)
+    return copied
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="生成语音日报的播客 feed 和静态页面。")
     parser.add_argument("--digests-dir", default="digests", help="日报目录（默认 digests）")
@@ -400,7 +393,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--audio-base-url",
         default=os.getenv("AUDIO_BASE_URL", "").strip(),
-        help="音频的公开访问前缀，例如 https://audio.example.com",
+        help="音频公开前缀；默认使用站点地址下的 audio/ 目录（R2 备用时才需要设置）",
     )
     parser.add_argument(
         "--site-url",
@@ -418,7 +411,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--no-head",
         action="store_true",
-        help="不检查远程音频是否存在（离线构建/测试用）",
+        help="已废弃，保留以兼容旧命令；现在不再做远程音频检查",
     )
     return parser.parse_args(argv)
 
@@ -426,15 +419,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     try:
-        audio_base_url = args.audio_base_url
-        if not audio_base_url:
-            raise ValueError("缺少 AUDIO_BASE_URL（R2 的公开访问地址）")
-
         site_url = args.site_url or default_site_url()
         if not site_url:
             raise ValueError("无法推导站点地址，请设置 SITE_URL")
         if not site_url.endswith("/"):
             site_url += "/"
+        audio_base_url = args.audio_base_url or f"{site_url}audio"
         feed_url = f"{site_url}feed.xml"
         repo_url = (args.repo_url or default_repo_url()).rstrip("/")
 
@@ -452,12 +442,11 @@ def main(argv: list[str] | None = None) -> int:
             digests_dir,
             audio_dir,
             audio_base_url,
-            head=not args.no_head,
             limit=args.limit,
             repo_url=repo_url,
         )
         if not episodes:
-            raise ValueError("没有找到可发布的语音节目（检查 digests/ 和音频是否已上传）")
+            raise ValueError("没有找到可发布的语音节目（检查 digests/ 和 audio/ 是否有对应 MP3）")
 
         cover_url = ""
         for name in ("cover.jpg", "cover.png", "cover.jpeg"):
@@ -466,6 +455,7 @@ def main(argv: list[str] | None = None) -> int:
                 break
 
         site_dir.mkdir(parents=True, exist_ok=True)
+        copied = copy_audio(audio_dir, site_dir)
         index_path = site_dir / "index.html"
         feed_path = site_dir / "feed.xml"
         index_path.write_text(
@@ -490,6 +480,7 @@ def main(argv: list[str] | None = None) -> int:
         )
 
         print(f"节目数：{len(episodes)}")
+        print(f"音频文件：{len(copied)}")
         print(f"页面：{_display_path(index_path)}")
         print(f"Feed：{_display_path(feed_path)}")
         print(f"订阅地址：{feed_url}")

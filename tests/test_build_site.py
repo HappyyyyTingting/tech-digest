@@ -3,7 +3,6 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest import mock
 from xml.etree import ElementTree as ET
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -39,12 +38,12 @@ class BuildSiteTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
+            (audio / "2026-10-26.mp3").write_bytes(b"x" * 100)
 
             episodes = build_site.load_episodes(
                 digests,
                 audio,
                 "https://audio.example.com",
-                head=False,
                 repo_url="https://github.com/example/repo",
             )
 
@@ -60,13 +59,14 @@ class BuildSiteTests(unittest.TestCase):
                 episodes[1].audio_url, "https://audio.example.com/2026-10-26.mp3"
             )
 
-    def test_head_check_excludes_episodes_without_a_remote_upload(self):
+    def test_episodes_without_audio_are_skipped_and_metadata_url_wins(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             digests = root / "digests"
             audio = root / "audio"
             digests.mkdir()
             audio.mkdir()
+            write_digest(digests, "2026-10-25")
             write_digest(digests, "2026-10-26")
             write_digest(digests, "2026-10-27")
             (audio / "2026-10-26.json").write_text(
@@ -79,16 +79,42 @@ class BuildSiteTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            # A local MP3 alone must not publish a dead remote link.
+            # A local MP3 is served from the site itself.
             (audio / "2026-10-27.mp3").write_bytes(b"x" * 100)
 
-            with mock.patch("build_site.head_size", return_value=None) as head:
-                episodes = build_site.load_episodes(
-                    digests, audio, "https://audio.example.com", head=True
-                )
+            episodes = build_site.load_episodes(
+                digests, audio, "https://example.github.io/tech-digest/audio"
+            )
 
-            self.assertEqual([episode.date for episode in episodes], ["2026-10-26"])
-            self.assertEqual(head.call_count, 1)
+            self.assertEqual(
+                [episode.date for episode in episodes], ["2026-10-27", "2026-10-26"]
+            )
+            self.assertEqual(
+                episodes[0].audio_url,
+                "https://example.github.io/tech-digest/audio/2026-10-27.mp3",
+            )
+            self.assertEqual(
+                episodes[1].audio_url, "https://audio.example.com/2026-10-26.mp3"
+            )
+
+    def test_copy_audio_replaces_the_site_audio_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            audio = root / "audio"
+            site = root / "site"
+            audio.mkdir()
+            site.mkdir()
+            (site / "audio").mkdir()
+            (site / "audio" / "old.mp3").write_bytes(b"old")
+            (audio / "2026-10-27.mp3").write_bytes(b"x" * 10)
+
+            copied = build_site.copy_audio(audio, site)
+
+            self.assertEqual(copied, ["2026-10-27.mp3"])
+            self.assertEqual(
+                (site / "audio" / "2026-10-27.mp3").read_bytes(), b"x" * 10
+            )
+            self.assertFalse((site / "audio" / "old.mp3").exists())
 
     def test_limit_keeps_latest_episodes(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -99,9 +125,10 @@ class BuildSiteTests(unittest.TestCase):
             audio.mkdir()
             for day in ("2026-10-25", "2026-10-26", "2026-10-27"):
                 write_digest(digests, day)
+                (audio / f"{day}.mp3").write_bytes(b"x" * 10)
 
             episodes = build_site.load_episodes(
-                digests, audio, "https://audio.example.com", head=False, limit=2
+                digests, audio, "https://audio.example.com", limit=2
             )
 
             self.assertEqual([episode.date for episode in episodes], ["2026-10-27", "2026-10-26"])
